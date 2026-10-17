@@ -1,0 +1,75 @@
+name: Build RhinoCloud Converter Windows
+
+'on':
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup dotnet
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Setup Miniforge
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          miniforge-version: latest
+          activate-environment: cloudengine
+          auto-activate-base: false
+
+      - name: Install PDAL and E57 support
+        run: |
+          conda create -y -p "$env:GITHUB_WORKSPACE\pdal-env" -c conda-forge pdal libpdal-e57
+          if ($LASTEXITCODE -ne 0) { throw 'Conda installation failed' }
+
+      - name: Check conversion drivers
+        run: |
+          $root = Join-Path $env:GITHUB_WORKSPACE 'pdal-env'
+          $env:PATH = "$root\Library\bin;$root\Scripts;$root;$env:PATH"
+          $env:PDAL_DRIVER_PATH = "$root\Library\bin"
+          $exe = Join-Path $root 'Library\bin\pdal.exe'
+          if (!(Test-Path $exe)) { $exe = Join-Path $root 'Scripts\pdal.exe' }
+          if (!(Test-Path $exe)) { throw 'pdal.exe missing' }
+          $drivers = (& $exe --drivers 2>&1 | Out-String)
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot enumerate PDAL drivers' }
+          $drivers | Set-Content pdal-drivers.txt
+          if ($drivers -notmatch 'readers.e57') { throw 'readers.e57 missing' }
+          if ($drivers -notmatch 'writers.copc') { throw 'writers.copc missing' }
+
+      - name: Publish Windows application
+        run: |
+          dotnet publish src/RhinoCloudConverter.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -o dist
+          if ($LASTEXITCODE -ne 0) { throw 'dotnet publish failed' }
+
+      - name: Package runtime
+        run: |
+          New-Item -ItemType Directory -Force dist/engine | Out-Null
+          robocopy pdal-env dist/engine /E /NFL /NDL /NJH /NJS /NP
+          if ($LASTEXITCODE -gt 7) { throw "robocopy failed: $LASTEXITCODE" }
+          Copy-Item pdal-drivers.txt dist/pdal-drivers.txt
+          Copy-Item README.md dist/README.txt
+
+      - name: Create archive
+        run: |
+          Compress-Archive -Path dist/* -DestinationPath RhinoCloudConverter-Windows-x64-Portable.zip -CompressionLevel Optimal
+
+      - name: Upload archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: RhinoCloudConverter-Windows-x64-Portable
+          path: RhinoCloudConverter-Windows-x64-Portable.zip
+          retention-days: 14
